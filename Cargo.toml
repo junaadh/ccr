@@ -1,0 +1,14 @@
+[package]
+name = "ccr"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ccr"
+path = "src/main.rs"
+
+[lib]
+name = "ccr_core"
+path = "src/lib.rs"
+
+[dependencies]
