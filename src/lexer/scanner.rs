@@ -1,202 +1,331 @@
-use std::{iter::Peekable, str::CharIndices};
+use std::{fmt::Debug, str::Chars};
 
 use super::{Base, CToken, CTokenKind, LiteralKind, ScannerTypes, Span, Symbol, TokenStream};
+
+pub const EOF: char = '\0';
 
 #[derive(Debug)]
 pub struct Scanner<'a> {
     pub source: &'a str,
-    cursor_pos: usize,
-    chars: Peekable<CharIndices<'a>>,
+    remaining_len: usize,
+    chars: Chars<'a>,
     line: usize,
 }
 
 impl<'a> Scanner<'a> {
     pub fn new(source: &'a str) -> Self {
-        let mut chars = source.char_indices().peekable();
+        let chars = source.chars();
         Self {
             source,
-            cursor_pos: chars
-                .peek()
-                .map(|(index, _char)| *index)
-                .unwrap_or_default(),
+            remaining_len: source.len(),
             chars,
             line: 1,
         }
     }
 
-    pub fn tokenize(&mut self) -> TokenStream<'a> {
-        let mut stream = TokenStream::default();
-
-        loop {
-            let tok = self.next_token();
-            stream.push(tok);
-            match tok.kind {
-                CTokenKind::RightBrace => break,
-                _ => continue,
+    pub fn iterate(mut self) -> impl Iterator<Item = CToken<'a>> + 'a {
+        std::iter::from_fn(move || {
+            let tt = self.next_token();
+            if tt.kind != CTokenKind::Eof {
+                Some(tt)
+            } else {
+                None
             }
-        }
-        let tok = self.make_eof();
+        })
+    }
 
-        stream.push(tok);
+    pub fn test(self) -> TokenStream<'a> {
+        let mut stream = TokenStream::default();
+        let iter = self.iterate();
+
+        for c in iter {
+            stream.push(c);
+        }
 
         stream
     }
 
+    fn first(&self) -> char {
+        self.chars.clone().next().unwrap_or(EOF)
+    }
+
+    fn as_str(&self) -> &'a str {
+        self.chars.as_str()
+    }
+
+    fn pos(&self) -> usize {
+        self.normalize(self.chars.as_str().len())
+    }
+
+    fn reset_pos(&mut self) {
+        self.remaining_len = self.chars.as_str().len();
+    }
+
+    fn is_eof(&self) -> bool {
+        self.as_str().is_empty()
+    }
+
     fn advance(&mut self) -> Option<char> {
-        self.chars.next().map(|(_index, char)| char)
+        self.chars.next()
     }
 
-    fn current_pos(&mut self) -> usize {
-        self.chars
-            .peek()
-            .map(|(index, _char)| *index)
-            .unwrap_or_else(|| self.source.len())
+    fn advance_while(&mut self, mut predicate: impl FnMut(char) -> bool) {
+        while predicate(self.first()) && !self.is_eof() {
+            self.advance();
+        }
     }
 
-    fn symbol(&mut self, end: usize, token_ty: CTokenKind) -> Symbol<'a> {
-        let lex = &self.source[self.cursor_pos..end];
-        match token_ty {
-            // FIXME
+    fn normalize(&self, pos: usize) -> usize {
+        self.source.len() - pos
+    }
+
+    fn symbolize(&self, tt_ty: CTokenKind, start: usize, end: usize) -> Symbol<'a> {
+        let lexeme = &self.source[start..end];
+
+        match tt_ty {
             CTokenKind::Literal { kind, suffix_start } => match kind {
                 LiteralKind::Int { base } => {
-                    usize::from_str_radix(&lex[suffix_start..], base as u32)
+                    usize::from_str_radix(&lexeme[suffix_start..], base as u32)
                         .unwrap()
                         .into()
                 }
-                LiteralKind::Char => (lex.as_bytes()[0] as char).into(),
-                LiteralKind::Str => lex.into(),
-                _ => todo!(),
+
+                LiteralKind::Float { .. } => lexeme.parse::<f64>().unwrap().into(),
+
+                LiteralKind::Char => todo!(),
+
+                LiteralKind::Str => Symbol::String {
+                    sym: &lexeme[suffix_start..lexeme.len() - 1],
+                },
+
+                LiteralKind::Byte => todo!(),
+
+                LiteralKind::Literal => lexeme.into(),
             },
-            _kind => lex.into(),
+
+            _ => lexeme.into(),
         }
     }
 
-    fn peek(&mut self) -> Option<&char> {
-        self.chars.peek().map(|(_index, char)| char)
-    }
+    fn tokenize(&self, kind: CTokenKind) -> CToken<'a> {
+        let start = self.normalize(self.remaining_len);
+        let end = self.pos();
 
-    fn make_token(&mut self, kind: CTokenKind) -> CToken<'a> {
-        let len = self.current_pos();
-        let lexeme = self.symbol(len, kind);
+        let symbol = self.symbolize(kind, start, end);
 
-        CToken::new(kind, lexeme, Span::new(self.cursor_pos, len))
-    }
-
-    fn make_eof(&mut self) -> CToken<'a> {
-        let len = self.current_pos();
-        CToken::eof(Span::new(len, len))
+        CToken::new(kind, symbol, Span::new(start, end))
     }
 
     fn next_token(&mut self) -> CToken<'a> {
-        self.whitespace();
-        self.cursor_pos = self.current_pos();
-
-        let c = self.advance();
-        // println!("{c:?}");
-
-        if c.is_identifier() {
-            return self.identifiers();
-        }
-
-        match c {
-            Some(char) => match char {
-                '0' => match self.advance() {
-                    Some('b') => self.number(Base::Binary),
-                    Some('x') => self.number(Base::Hexadecimal),
-                    x if x.is_digit(Base::Octal) => self.number(Base::Octal),
-                    Some(_) => self.number(Base::Decimal),
-                    None => self.make_eof(),
-                },
-                x if Some(x).is_digit(Base::Decimal) => self.number(Base::Decimal),
-                '/' => match self.peek() {
-                    Some('/') => self.line_comment(),
-                    Some('*') => self.block_comment(),
-                    _ => self.make_token(CTokenKind::Slash),
-                },
-                '{' => self.make_token(CTokenKind::LeftBrace),
-                '}' => self.make_token(CTokenKind::RightBrace),
-                '(' => self.make_token(CTokenKind::LeftParen),
-                ')' => self.make_token(CTokenKind::RightParen),
-                '=' => self.make_token(CTokenKind::Equal),
-                ';' => self.make_token(CTokenKind::SemiColon),
-                _ => todo!(),
+        use CTokenKind::*;
+        let first_char = match self.advance() {
+            Some(c) => match self.is_whitespace_line(c) {
+                true => {
+                    self.skip_whitespace();
+                    match self.advance() {
+                        Some(c) => c,
+                        None => return self.tokenize(Eof),
+                    }
+                }
+                false => c,
             },
-            None => self.make_eof(),
+            None => return CToken::new(Eof, Symbol::None, Span::new(0, 0)),
+        };
+
+        let token_kind = match first_char {
+            '/' => match self.first() {
+                '/' => self.line_comment(),
+                '*' => self.block_comment(),
+                _ => Slash,
+            },
+
+            a if a.is_identifier() => self.identifier(),
+
+            '0' => match self.first() {
+                'b' => {
+                    self.advance();
+                    self.numbers(Base::Binary)
+                }
+                'x' => {
+                    self.advance();
+                    self.numbers(Base::Hexadecimal)
+                }
+                _o @ '0'..='7' => self.numbers(Base::Octal),
+                // float??
+                // '.' => self.numbers(Base::Decimal),
+                _ => self.numbers(Base::Decimal),
+            },
+            _d @ '0'..='9' => self.numbers(Base::Decimal),
+
+            ';' => SemiColon,
+            ',' => Comma,
+            '.' => Dot,
+            '(' => LeftParen,
+            ')' => RightParen,
+            '{' => LeftBrace,
+            '}' => RightBrace,
+            '[' => LeftBraket,
+            ']' => RightBracket,
+            '#' => Pound,
+            '*' => Star,
+            '&' => And,
+            '|' => Or,
+            '^' => Caret,
+            '~' => Tilde,
+
+            '"' => self.string(),
+            '-' => match self.first() {
+                '-' => MinusMinus,
+                '>' => Arrow,
+                _ => Minus,
+            },
+            '+' => match self.first() {
+                '+' => PlusPlus,
+                _ => Plus,
+            },
+            '<' => match self.first() {
+                a if a.is_ascii_alphabetic() => self.header(),
+                '=' => LtEqual,
+                _ => Lt,
+            },
+            '>' => match self.first() {
+                '=' => GtEqual,
+                _ => Gt,
+            },
+            '=' => match self.first() {
+                '=' => EqualEqual,
+                _ => Equal,
+            },
+            '!' => match self.first() {
+                '=' => BangEqual,
+                _ => Bang,
+            },
+            _ => CTokenKind::Unknown,
+        };
+
+        let res = self.tokenize(token_kind);
+        self.reset_pos();
+        res
+    }
+
+    fn header(&mut self) -> CTokenKind {
+        let is_header = |c: char| -> bool { c != '>' };
+        self.advance_while(is_header);
+        CTokenKind::Header
+    }
+
+    fn identifier(&mut self) -> CTokenKind {
+        let identifier = |c: char| -> bool { c.is_identifier() };
+        self.advance_while(identifier);
+
+        CTokenKind::Ident
+    }
+
+    fn numbers(&mut self, base: Base) -> CTokenKind {
+        let bin = |c: char| -> bool { matches!(c, '0'..='1') };
+        let oct = |c: char| -> bool { matches!(c, '0'..='7') };
+        let dec = |c: char| -> bool { c.is_ascii_digit() };
+        let hex = |c: char| -> bool { c.is_ascii_hexdigit() };
+
+        let suf = match base {
+            Base::Binary => {
+                self.advance_while(bin);
+                2
+            }
+            Base::Octal => {
+                self.advance_while(oct);
+                0
+            }
+            Base::Decimal => {
+                self.advance_while(dec);
+                if matches!(self.first(), '.') {
+                    self.advance();
+                    self.advance_while(dec);
+                    return CTokenKind::Literal {
+                        kind: LiteralKind::Float { base },
+                        suffix_start: 0,
+                    };
+                }
+                0
+            }
+            Base::Hexadecimal => {
+                self.advance_while(hex);
+                2
+            }
+        };
+
+        CTokenKind::Literal {
+            kind: LiteralKind::Int { base },
+            suffix_start: suf,
         }
     }
 
-    fn number(&mut self, base: Base) -> CToken<'a> {
-        while self.chars.peek().map(|(_index, char)| char).is_digit(base) {
-            self.advance();
+    fn line_comment(&mut self) -> CTokenKind {
+        let is_line = |c: char| -> bool { c != '\n' };
+        self.advance_while(is_line);
+        self.line += 1;
+        CTokenKind::LineComment
+    }
+
+    fn block_comment(&mut self) -> CTokenKind {
+        while let Some(c) = self.advance() {
+            match c {
+                '\n' => self.line += 1,
+                '*' if self.first() == '/' => {
+                    self.advance();
+                    break;
+                }
+                _ => (),
+            }
         }
 
-        let suf = match base {
-            Base::Binary | Base::Hexadecimal => 2,
-            Base::Octal | Base::Decimal => 0,
-        };
+        CTokenKind::BlockComment
+    }
+
+    fn is_whitespace_line(&mut self, c: char) -> bool {
+        match c {
+            '\n' => {
+                self.line += 1;
+                true
+            }
+            '\r' | ' ' | '\t' => true,
+            _ => false,
+        }
+    }
+
+    fn is_whitespace(c: char) -> bool {
+        matches!(c, '\n' | '\r' | ' ' | '\t')
+    }
+
+    fn skip_whitespace(&mut self) -> CTokenKind {
+        self.advance_while(Self::is_whitespace);
+        self.reset_pos();
+        CTokenKind::Whitespace
+    }
+
+    fn string(&mut self) -> CTokenKind {
+        let is_string = |c: char| -> bool { c != '"' };
+        self.advance_while(is_string);
+        self.advance();
+        CTokenKind::Literal {
+            kind: LiteralKind::Str,
+            suffix_start: 1,
+        }
+    }
+
+    /*
+    fn string(&mut self) -> CToken<'a> {
+
+        while self.peek() != Some(&'"') {
+            self.advance();
+        }
+        self.advance();
 
         self.make_token(CTokenKind::Literal {
-            kind: LiteralKind::Int { base },
-            // TODO: dynamic??!
-            suffix_start: suf,
+            kind: LiteralKind::Str,
+            suffix_start: 1,
         })
     }
 
-    fn identifiers(&mut self) -> CToken<'a> {
-        while self.chars.peek().map(|(_index, char)| char).is_identifier() {
-            self.advance();
-        }
-
-        self.make_token(CTokenKind::Ident)
-    }
-
-    fn line_comment(&mut self) -> CToken<'a> {
-        loop {
-            match self.advance() {
-                Some('\n') => return self.make_token(CTokenKind::LineComment),
-                Some(_a) => continue,
-                None => return self.make_token(CTokenKind::Eof),
-            }
-        }
-    }
-
-    fn block_comment(&mut self) -> CToken<'a> {
-        loop {
-            match self.advance() {
-                Some('\n') => {
-                    self.line += 1;
-                    continue;
-                }
-                Some('*') => {
-                    if let Some(c) = self.advance() {
-                        if c == '/' {
-                            return self.make_token(CTokenKind::BlockComment);
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-                Some(_) => continue,
-                None => return self.make_token(CTokenKind::Eof),
-            }
-        }
-    }
-
-    fn whitespace(&mut self) -> CToken<'a> {
-        loop {
-            if let Some(c) = self.peek() {
-                match c {
-                    _whitespace @ (' ' | '\r' | '\t') => {
-                        self.advance();
-                    }
-                    '\n' => {
-                        self.line += 1;
-                        self.advance();
-                    }
-                    _ => break,
-                }
-            }
-        }
-        self.make_token(CTokenKind::Whitespace)
-    }
+    } */
 }

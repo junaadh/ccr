@@ -28,6 +28,7 @@ pub enum LiteralKind {
     Char,
     Str,
     Byte,
+    Literal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,29 +82,17 @@ impl<'a> From<char> for Symbol<'a> {
 
 pub trait ScannerTypes {
     fn is_identifier(&self) -> bool;
-    fn is_digit(&self, base: Base) -> bool;
+    fn is_cdigit(&self, base: Base) -> bool;
+    // fn is_whitespace(&self, line: &mut usize) -> bool;
 }
 
-impl ScannerTypes for Option<&char> {
+impl ScannerTypes for char {
     fn is_identifier(&self) -> bool {
-        self.map(|x| x.is_ascii_alphabetic() || *x == '_')
-            .unwrap_or(false)
+        self.is_ascii_alphabetic() || *self == '_'
     }
 
-    // FIXME
-    fn is_digit(&self, base: Base) -> bool {
-        self.map(|x| x.is_digit(base as u32)).unwrap_or(false)
-    }
-}
-impl ScannerTypes for Option<char> {
-    fn is_identifier(&self) -> bool {
-        self.map(|x| x.is_ascii_alphabetic() || x == '_')
-            .unwrap_or(false)
-    }
-
-    // FIXME
-    fn is_digit(&self, base: Base) -> bool {
-        self.map(|x| x.is_digit(base as u32)).unwrap_or(false)
+    fn is_cdigit(&self, base: Base) -> bool {
+        self.is_digit(base as u32)
     }
 }
 

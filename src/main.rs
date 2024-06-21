@@ -11,10 +11,10 @@ fn main() {
 
     let buf = std::str::from_utf8(&buf).expect("ff");
 
-    let mut scanner = Scanner::new(buf);
-    let stream = scanner.tokenize();
+    let scanner = Scanner::new(buf);
+    let stream = scanner.test();
 
     for s in stream.iter() {
-        println!("{s:?}");
+        println!("{s:#?}");
     }
 }
